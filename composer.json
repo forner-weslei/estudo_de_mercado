@@ -1,0 +1,7 @@
+{
+  "name": "weslei/estudo-mercado-avancado",
+  "type": "project",
+  "require": {
+    "php": "^8.2"
+  }
+}
