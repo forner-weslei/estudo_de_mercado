@@ -1,44 +1,69 @@
+# =========================
+# 1) Build do frontend (Vite)
+# =========================
+FROM node:20-bookworm-slim AS node_build
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+# =========================
+# 2) Composer deps
+# =========================
+FROM composer:2 AS composer_build
+WORKDIR /app
+
+COPY composer.json composer.lock ./
+RUN composer install \
+  --no-dev \
+  --prefer-dist \
+  --no-interaction \
+  --no-progress \
+  --optimize-autoloader
+
+# =========================
+# 3) Runtime (Apache + PHP)
+# =========================
 FROM php:8.2-apache
 
-# Desativar MPMs extras e garantir apenas prefork
-RUN a2dismod mpm_event mpm_worker || true && a2enmod mpm_prefork
+# Dependências + extensões comuns do Laravel
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git unzip zip libzip-dev libpng-dev libjpeg-dev libfreetype6-dev \
+  && docker-php-ext-configure gd --with-freetype --with-jpeg \
+  && docker-php-ext-install pdo_mysql zip gd \
+  && a2enmod rewrite headers \
+  && rm -rf /var/lib/apt/lists/*
 
-# Instalar dependências do sistema
-RUN apt-get update && apt-get install -y \
-    git \
-    unzip \
-    libzip-dev \
-    libpng-dev \
-    libonig-dev \
-    libxml2-dev \
-    && docker-php-ext-install pdo_mysql mbstring zip exif pcntl bcmath gd
-
-# Habilitar mod_rewrite (Laravel)
-RUN a2enmod rewrite
-
-# Definir diretório de trabalho
 WORKDIR /var/www/html
 
-# Copiar projeto
-COPY . .
+# Copia app
+COPY . /var/www/html
 
-# Instalar Composer
-COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+# Copia vendor do composer stage
+COPY --from=composer_build /app/vendor /var/www/html/vendor
 
-# Criar diretórios e permissões do Laravel
-RUN mkdir -p storage/framework/cache \
-    storage/framework/sessions \
-    storage/framework/views \
-    bootstrap/cache \
-    && chown -R www-data:www-data storage bootstrap/cache \
-    && chmod -R 775 storage bootstrap/cache
+# Copia assets buildados pelo Vite
+# (ajuste se seu build gerar em outro caminho)
+COPY --from=node_build /app/public/build /var/www/html/public/build
 
-# Instalar dependências PHP
-RUN composer install --no-dev --optimize-autoloader
+# Apache apontando para /public
+RUN sed -i 's#/var/www/html#/var/www/html/public#g' /etc/apache2/sites-available/000-default.conf \
+ && sed -i 's#/var/www/#/var/www/html/public#g' /etc/apache2/apache2.conf || true
 
-# Permissões finais
-RUN chown -R www-data:www-data /var/www/html
+# Garantir pastas e permissões do Laravel
+RUN mkdir -p storage bootstrap/cache \
+ && chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache \
+ && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
 
-EXPOSE 80
+# Script de start para ajustar porta do Railway
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
 
-CMD ["apache2-foreground"]
+ENV APP_ENV=production
+ENV APP_DEBUG=false
+
+EXPOSE 8080
+CMD ["/start.sh"]
