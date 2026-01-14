@@ -1,4 +1,12 @@
-#!/bin/bash
-# Make sure this file has executable permissions, run `chmod +x start.sh`
-# Run migrations, set up nginx conf and run nginx
-php artisan migrate --force && node /assets/scripts/prestart.mjs /assets/nginx.template.conf /nginx.conf && (php-fpm -y /assets/php-fpm.conf & nginx -c /nginx.conf)
+#!/usr/bin/env bash
+set -e
+
+php artisan migrate --force || true
+
+PORT="${PORT:-8080}"
+
+# Apache precisa escutar a porta do Railway
+sed -i "s/Listen 80/Listen ${PORT}/" /etc/apache2/ports.conf
+sed -i "s/:80>/:${PORT}>/" /etc/apache2/sites-available/000-default.conf
+
+exec apache2-foreground
