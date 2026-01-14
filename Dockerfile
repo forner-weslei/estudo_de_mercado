@@ -1,35 +1,45 @@
-# Base oficial PHP com Apache (estável)
+# Imagem base com PHP 8.2 + Apache
 FROM php:8.2-apache
 
-# Dependências do sistema (sem libatomic1)
+# Instalar dependências do sistema
 RUN apt-get update && apt-get install -y \
-    git unzip libzip-dev libpng-dev libonig-dev libxml2-dev \
-    && docker-php-ext-install pdo_mysql mbstring zip exif pcntl \
-    && a2enmod rewrite \
-    && rm -rf /var/lib/apt/lists/*
+    git \
+    unzip \
+    libzip-dev \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    && docker-php-ext-install pdo_mysql mbstring zip exif pcntl bcmath gd
 
-# Composer (gerenciador do PHP)
-COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+# Habilitar mod_rewrite do Apache (necessário para Laravel)
+RUN a2enmod rewrite
 
-# Pasta do app
+# Definir diretório de trabalho
 WORKDIR /var/www/html
 
-# Copia tudo do repositório para dentro do container
+# Copiar arquivos do projeto
 COPY . .
 
-# Instala dependências do Laravel
+# Instalar Composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# Criar pastas necessárias e ajustar permissões
+RUN mkdir -p storage/framework/cache \
+    storage/framework/sessions \
+    storage/framework/views \
+    bootstrap/cache \
+    && chown -R www-data:www-data storage bootstrap/cache \
+    && chmod -R 775 storage bootstrap/cache
+
+# Instalar dependências do Laravel
 RUN composer install --no-dev --optimize-autoloader
 
-# Permissões básicas
-RUN chown -R www-data:www-data storage bootstrap/cache
+# Ajustar permissões finais
+RUN chown -R www-data:www-data /var/www/html \
+    && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
 
-# Apache precisa servir a pasta /public
-ENV APACHE_DOCUMENT_ROOT=/var/www/html/public
-RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf \
-    && sed -ri -e 's!/var/www/!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf
-
-# Porta padrão
+# Expor porta 80
 EXPOSE 80
 
-# Start
+# Iniciar Apache
 CMD ["apache2-foreground"]
