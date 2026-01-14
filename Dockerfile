@@ -1,71 +1,64 @@
-# ---------- STAGE 1: Composer (PHP 8.2 CLI) ----------
-FROM php:8.2-cli AS vendor
-
-WORKDIR /app
-
-# Dependências mínimas p/ composer + extensões comuns do Laravel
-RUN apt-get update && apt-get install -y \
-    git unzip libzip-dev \
- && docker-php-ext-install zip \
- && rm -rf /var/lib/apt/lists/*
-
-# Instala Composer (fixo) no stage com PHP 8.2
-COPY --from=composer:2.7 /usr/bin/composer /usr/bin/composer
-
-# Copia apenas arquivos do composer primeiro (melhor cache)
-COPY composer.json composer.lock ./
-
-# Instala dependências PHP (sem dev)
-RUN composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
-
-
-# ---------- STAGE 2: Node build (opcional, se você tiver Vite) ----------
-FROM node:20-bookworm-slim AS nodebuild
-WORKDIR /app
-
-# Só roda build se existir package.json
-COPY package*.json ./
-RUN if [ -f package.json ]; then npm ci; fi
-
-COPY . .
-RUN if [ -f package.json ]; then npm run build; fi
-
-
-# ---------- STAGE 3: Runtime (Apache + PHP 8.2) ----------
+# ====== Base ======
 FROM php:8.2-apache
 
+# ====== Dependências do sistema + extensões PHP ======
+RUN apt-get update && apt-get install -y \
+    git \
+    unzip \
+    zip \
+    libzip-dev \
+    libpng-dev \
+    libjpeg62-turbo-dev \
+    libfreetype6-dev \
+    libonig-dev \
+    libxml2-dev \
+    && docker-php-ext-configure gd --with-freetype --with-jpeg \
+    && docker-php-ext-install -j$(nproc) \
+        pdo \
+        pdo_mysql \
+        mbstring \
+        zip \
+        exif \
+        pcntl \
+        gd \
+    && a2enmod rewrite \
+    && rm -rf /var/lib/apt/lists/*
+
+# ====== Composer ======
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# ====== Apache aponta para /public (Laravel) ======
+ENV APACHE_DOCUMENT_ROOT=/var/www/html/public
+RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' \
+    /etc/apache2/sites-available/000-default.conf \
+    /etc/apache2/apache2.conf \
+    /etc/apache2/conf-available/*.conf
+
+# ====== Diretório do app ======
 WORKDIR /var/www/html
 
-# Extensões comuns do Laravel
-RUN apt-get update && apt-get install -y \
-    libzip-dev \
- && docker-php-ext-install pdo_mysql zip \
- && a2enmod rewrite headers \
- && rm -rf /var/lib/apt/lists/*
+# ====== Copia primeiro só o composer para aproveitar cache ======
+COPY composer.json composer.lock ./
 
-# DocumentRoot -> /public
-RUN sed -ri 's!/var/www/html!/var/www/html/public!g' /etc/apache2/sites-available/000-default.conf
+# ====== Instala dependências PHP (sem dev) ======
+RUN composer install \
+    --no-dev \
+    --prefer-dist \
+    --no-interaction \
+    --no-progress \
+    --optimize-autoloader
 
-# Copia o projeto
-COPY . /var/www/html
+# ====== Copia o restante do projeto ======
+COPY . .
 
-# Copia vendor do stage do composer (garante que veio do PHP 8.2)
-COPY --from=vendor /app/vendor /var/www/html/vendor
+# ====== Permissões (storage e cache) ======
+RUN chown -R www-data:www-data /var/www/html \
+    && chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache
 
-# Copia build do Vite (se existir)
-RUN if [ -d /var/www/html/public/build ]; then echo "build já existe"; fi
-COPY --from=nodebuild /app/public/build /var/www/html/public/build
+# ====== (Opcional) Otimizações Laravel (não falha build se não tiver .env) ======
+RUN php artisan config:cache || true \
+    && php artisan route:cache || true \
+    && php artisan view:cache || true
 
-# Garante pastas e permissões que o Laravel exige
-RUN mkdir -p /var/www/html/storage /var/www/html/bootstrap/cache \
- && chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
-
-# Start script
-COPY start.sh /start.sh
-RUN chmod +x /start.sh
-
-ENV APACHE_DOCUMENT_ROOT=/var/www/html/public
-
-EXPOSE 8080
-
-CMD ["/start.sh"]
+EXPOSE 80
+CMD ["apache2-foreground"]
