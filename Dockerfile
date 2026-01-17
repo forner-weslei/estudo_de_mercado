@@ -4,11 +4,9 @@
 FROM node:20-alpine AS node_build
 WORKDIR /app
 
-# Copia apenas o necessário para instalar deps JS (cache)
 COPY package*.json ./
 RUN if [ -f package.json ]; then npm ci; fi
 
-# Copia o resto e builda
 COPY . .
 RUN if [ -f package.json ]; then npm run build; fi
 
@@ -19,10 +17,8 @@ RUN if [ -f package.json ]; then npm run build; fi
 FROM composer:2 AS vendor
 WORKDIR /app
 
-# Copia composer files primeiro (cache)
 COPY composer.json composer.lock ./
 
-# Instala vendors sem scripts (evita erro "Could not open input file: artisan")
 RUN composer install \
   --no-dev \
   --prefer-dist \
@@ -37,10 +33,7 @@ RUN composer install \
 # =========================================================
 FROM php:8.2-fpm-alpine
 
-# ---------- Pacotes do sistema ----------
-# - nginx: web server
-# - supervisor: roda nginx + php-fpm juntos
-# - icu-dev / libzip / freetype / jpeg / png: extensões + dompdf/imagem
+# ---------- Pacotes do sistema + extensões ----------
 RUN apk add --no-cache \
     nginx \
     supervisor \
@@ -66,8 +59,7 @@ RUN apk add --no-cache \
       exif \
       pcntl \
       gd \
-      intl \
-  && rm -rf /var/cache/apk/*
+      intl
 
 # ---------- Diretório do app ----------
 WORKDIR /var/www/html
@@ -75,12 +67,10 @@ WORKDIR /var/www/html
 # Copia projeto
 COPY . .
 
-# Copia vendor do stage composer
+# Copia vendor
 COPY --from=vendor /app/vendor ./vendor
 
-# Copia build dos assets (se existir)
-# (Vite/Laravel geralmente gera em public/build)
-RUN if [ -d /app/public/build ]; then true; fi
+# Copia build de assets (se existir)
 COPY --from=node_build /app/public/build ./public/build
 
 # ---------- Permissões Laravel ----------
@@ -88,41 +78,37 @@ RUN mkdir -p storage bootstrap/cache \
   && chown -R www-data:www-data /var/www/html \
   && chmod -R 775 storage bootstrap/cache
 
-# ---------- Nginx config template (usa $PORT) ----------
-RUN mkdir -p /etc/nginx/templates /run/nginx
-RUN cat > /etc/nginx/templates/default.conf.template << 'EOF'
+# ---------- Nginx: template + dirs ----------
+RUN mkdir -p /etc/nginx/templates /etc/nginx/conf.d /run/nginx \
+  && cat > /etc/nginx/templates/default.conf.template << 'EOF'
 server {
     listen       ${PORT};
     server_name  _;
-    root         /var/www/html/public;
+    root /var/www/html/public;
 
     index index.php index.html;
-
-    # Ajuste para uploads grandes (opcional)
-    client_max_body_size 20M;
 
     location / {
         try_files $uri $uri/ /index.php?$query_string;
     }
 
     location ~ \.php$ {
+        try_files $uri =404;
         include fastcgi_params;
-        fastcgi_pass   127.0.0.1:9000;
-        fastcgi_index  index.php;
-        fastcgi_param  SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        fastcgi_read_timeout 300;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param PATH_INFO $fastcgi_path_info;
+        fastcgi_pass 127.0.0.1:9000;
     }
 
-    location ~* \.(css|js|jpg|jpeg|png|gif|ico|svg|webp|ttf|woff|woff2)$ {
-        expires 7d;
-        access_log off;
+    location ~ /\.(?!well-known).* {
+        deny all;
     }
 }
 EOF
 
-# ---------- Supervisor: roda php-fpm + nginx ----------
-RUN mkdir -p /etc/supervisor.d
-RUN cat > /etc/supervisor.d/supervisord.ini << 'EOF'
+# ---------- Supervisor: php-fpm + nginx ----------
+RUN mkdir -p /etc/supervisor.d \
+  && cat > /etc/supervisor.d/supervisord.ini << 'EOF'
 [supervisord]
 nodaemon=true
 user=root
@@ -138,26 +124,21 @@ autorestart=true
 priority=20
 EOF
 
-# ---------- Start script: aplica template e sobe supervisor ----------
+# ---------- Start script ----------
 RUN cat > /usr/local/bin/start.sh << 'EOF'
 #!/usr/bin/env sh
 set -e
 
-# Railway define PORT; fallback local
 export PORT="${PORT:-80}"
 
-# Gera conf final do nginx com envsubst
-envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
+mkdir -p /etc/nginx/conf.d
+mkdir -p /run/nginx
 
-# (Opcional) Se quiser, você pode rodar caches aqui APÓS ter .env/variáveis:
-# php artisan config:cache || true
-# php artisan route:cache || true
-# php artisan view:cache || true
+envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
 
 exec supervisord -c /etc/supervisor.d/supervisord.ini
 EOF
 RUN chmod +x /usr/local/bin/start.sh
 
-# Railway usa $PORT dinamicamente
 EXPOSE 80
 CMD ["/usr/local/bin/start.sh"]
