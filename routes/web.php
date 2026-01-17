@@ -1,60 +1,28 @@
 <?php
 
-use App\Http\Controllers\ProfileController;
-use App\Http\Controllers\TalkController;
-use App\Jobs\AddDatatoDB;
-use App\Jobs\SendNotification;
-use Illuminate\Support\Facades\Bus;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\StudyController;
+use App\Http\Controllers\ComparableController;
+use App\Http\Controllers\BrandController;
+use App\Http\Controllers\PresentationController;
 
 Route::get('/', function () {
-    return view('welcome');
+    return redirect()->route('dashboard');
 });
 
-Route::get('/dashboard', function () {
-    return view('dashboard');
-})->middleware(['auth', 'verified'])->name('dashboard');
+// IMPORTANT (LGPD / multi-user): enable scoped route-model bindings for nested resources
+// so that /estudos/{estudo}/amostras/{amostra} only resolves amostras that belong to {estudo}.
+Route::middleware(['auth'])->scopeBindings()->group(function () {
+    Route::view('/dashboard', 'dashboard')->name('dashboard');
 
-Route::middleware('auth')->group(function () {
-    Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
-    Route::patch('/profile', [ProfileController::class, 'update'])->name('profile.update');
-    Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
+    Route::get('/minha-marca', [BrandController::class, 'edit'])->name('brand.edit');
+    Route::post('/minha-marca', [BrandController::class, 'update'])->name('brand.update');
 
-    Route::get('talks/create', [TalkController::class, 'create'])->name('talks.create');
-    Route::post('talks', [TalkController::class, 'store'])->name('talks.store');
+    Route::resource('estudos', StudyController::class);
+    Route::resource('estudos.amostras', ComparableController::class);
 
-    
-});
-
-Route::get('/jobs', function() {
-
-    /** 
-     * Test Jobs are working...
-     * dispatch SendNotification and AddDataToDB Job
-     */
-
-    echo "Your jobs are being dispatching....";
-    Bus::chain([
-        new AddDatatoDB,
-        new SendNotification
-    ])->dispatch();
-});
-
-Route::get('/cache', function() {
-
-    /**
-     * Testing your cache infra is working...
-     */
-    echo "Storing inside the redis cache...\n";
-    Cache::store('redis')->put('bar', 'baz', 600); // 10 Minutes
-    Cache::put('paas', 'railway'); // store indefinitely
-
-    $value = Cache::get('bar');
-    $deployment = Cache::get('paas');
-    echo "This is the result from the cache for bar...{$value} \n";
-    echo "This is the result from the cache for paas...{$deployment}";
-    
+    Route::get('/estudos/{study}/apresentacao', [PresentationController::class, 'show'])->name('studies.presentation');
+    Route::get('/estudos/{study}/exportar-pdf', [PresentationController::class, 'pdf'])->name('studies.pdf');
 });
 
 require __DIR__.'/auth.php';
