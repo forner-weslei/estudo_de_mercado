@@ -31,7 +31,7 @@ RUN composer install \
 # =========================================================
 # 3) STAGE: Runtime (PHP-FPM + Nginx)
 # =========================================================
-FROM php:8.2-fpm-alpine
+FROM php:8.4-fpm-alpine
 
 # ---------- Pacotes do sistema + extensões ----------
 RUN apk add --no-cache \
