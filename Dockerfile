@@ -1,5 +1,5 @@
-# ====== Base ======
-FROM php:8.2-apache
+# ====== Base (PHP 8.4) ======
+FROM php:8.4-apache
 
 # ====== Dependências do sistema + extensões PHP ======
 RUN apt-get update && apt-get install -y \
@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     libfreetype6-dev \
     libonig-dev \
     libxml2-dev \
+    libicu-dev \
     && docker-php-ext-configure gd --with-freetype --with-jpeg \
     && docker-php-ext-install -j$(nproc) \
         pdo \
@@ -21,6 +22,7 @@ RUN apt-get update && apt-get install -y \
         exif \
         pcntl \
         gd \
+        intl \
     && a2enmod rewrite \
     && rm -rf /var/lib/apt/lists/*
 
@@ -50,6 +52,9 @@ RUN composer install \
 
 # ====== Copia o restante do projeto ======
 COPY . .
+
+# ====== Garante pastas necessárias (evita erro em build) ======
+RUN mkdir -p /var/www/html/storage /var/www/html/bootstrap/cache
 
 # ====== Permissões (storage e cache) ======
 RUN chown -R www-data:www-data /var/www/html \
