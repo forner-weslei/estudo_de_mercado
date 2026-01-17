@@ -20,9 +20,12 @@ RUN apt-get update && apt-get install -y \
         gd \
         intl \
     && a2enmod rewrite \
-    && a2dismod mpm_prefork mpm_worker || true \
-    && a2enmod mpm_event \
+    # ====== MPM: força APENAS prefork (hard reset) ======
+    && a2dismod mpm_event mpm_worker mpm_prefork || true \
+    && rm -f /etc/apache2/mods-enabled/mpm_*.load /etc/apache2/mods-enabled/mpm_*.conf \
+    && a2enmod mpm_prefork \
     && rm -rf /var/lib/apt/lists/*
+
 
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
