@@ -76,17 +76,26 @@ COPY . .
 # Copia vendor do stage composer
 COPY --from=vendor /app/vendor ./vendor
 
-# Copia build de assets (se existir)
-# (Se não existir, o COPY pode falhar; por isso fazemos um fallback seguro)
+# Copia build de assets (Vite: public/build)
+# Observação: assume que existe; se seu projeto não gera build, me avise que ajusto para não falhar.
 COPY --from=node_build /app/public/build ./public/build
 
-# ---------- Permissões Laravel ----------
-RUN mkdir -p storage bootstrap/cache \
+# ---------- Pastas essenciais + permissões Laravel ----------
+# Corrige o 500:
+# - storage/framework/sessions inexistente
+# - cache path inválido (views/cache)
+RUN mkdir -p storage/framework/sessions \
+           storage/framework/views \
+           storage/framework/cache \
+           storage/framework/testing \
+           storage/logs \
+           bootstrap/cache \
   && chown -R www-data:www-data /var/www/html \
   && chmod -R 775 storage bootstrap/cache
 
 # =========================================================
-# NGINX: config principal CORRETO (corrige "server not allowed here")
+# NGINX: config principal correto
+# (corrige "server directive is not allowed here")
 # =========================================================
 RUN cat > /etc/nginx/nginx.conf << 'EOF'
 worker_processes  1;
@@ -144,7 +153,7 @@ server {
 EOF
 
 # =========================================================
-# Supervisor: logs no stdout/stderr (pra debugar fácil no Railway)
+# Supervisor: logs no stdout/stderr (pra debugar no Railway)
 # =========================================================
 RUN cat > /etc/supervisor.d/supervisord.ini << 'EOF'
 [supervisord]
@@ -184,9 +193,16 @@ mkdir -p /etc/nginx/conf.d /run/nginx
 # Gera o default.conf com a porta do Railway
 envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
 
-# Permissões em runtime (se o Railway montar volume)
-mkdir -p /var/www/html/storage /var/www/html/bootstrap/cache
+# Corrige 500 por falta de pastas de session/cache/view em runtime
+mkdir -p /var/www/html/storage/framework/sessions \
+         /var/www/html/storage/framework/views \
+         /var/www/html/storage/framework/cache \
+         /var/www/html/storage/framework/testing \
+         /var/www/html/storage/logs \
+         /var/www/html/bootstrap/cache
+
 chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache || true
+chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache || true
 
 exec supervisord -c /etc/supervisor.d/supervisord.ini
 EOF
