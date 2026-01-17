@@ -41,6 +41,7 @@ RUN apk add --no-cache \
     git \
     unzip \
     zip \
+    gettext \
     icu-dev \
     libzip-dev \
     freetype-dev \
