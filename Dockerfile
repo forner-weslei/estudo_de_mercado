@@ -12,13 +12,12 @@ RUN if [ -f package.json ]; then npm run build; fi
 
 
 # =========================================================
-# 2) STAGE: Composer deps (PHP vendor)
+# 2) STAGE: Composer deps (vendor)
 # =========================================================
 FROM composer:2 AS vendor
 WORKDIR /app
 
 COPY composer.json composer.lock ./
-
 RUN composer install \
   --no-dev \
   --prefer-dist \
@@ -29,11 +28,14 @@ RUN composer install \
 
 
 # =========================================================
-# 3) STAGE: Runtime (PHP-FPM + Nginx)
+# 3) RUNTIME: PHP-FPM + Nginx + Supervisor
 # =========================================================
 FROM php:8.4-fpm-alpine
 
-# ---------- Pacotes do sistema + extensões ----------
+# Pacotes do sistema
+# - nginx: web server
+# - supervisor: roda nginx + php-fpm
+# - gettext: fornece envsubst (ESSENCIAL)
 RUN apk add --no-cache \
     nginx \
     supervisor \
@@ -62,26 +64,25 @@ RUN apk add --no-cache \
       gd \
       intl
 
-# ---------- Diretório do app ----------
 WORKDIR /var/www/html
 
-# Copia projeto
+# App + vendor
 COPY . .
-
-# Copia vendor
 COPY --from=vendor /app/vendor ./vendor
 
-# Copia build de assets (se existir)
+# Assets (se existir)
 COPY --from=node_build /app/public/build ./public/build
 
-# ---------- Permissões Laravel ----------
+# Permissões Laravel
 RUN mkdir -p storage bootstrap/cache \
   && chown -R www-data:www-data /var/www/html \
   && chmod -R 775 storage bootstrap/cache
 
-# ---------- Nginx: template + dirs ----------
-RUN mkdir -p /etc/nginx/templates /etc/nginx/conf.d /run/nginx \
-  && cat > /etc/nginx/templates/default.conf.template << 'EOF'
+# Pastas do nginx/supervisor
+RUN mkdir -p /etc/nginx/templates /etc/nginx/conf.d /run/nginx /etc/supervisor.d
+
+# Template do Nginx (usa $PORT do Railway)
+RUN cat > /etc/nginx/templates/default.conf.template << 'EOF'
 server {
     listen       ${PORT};
     server_name  _;
@@ -96,20 +97,20 @@ server {
     location ~ \.php$ {
         try_files $uri =404;
         include fastcgi_params;
+        fastcgi_pass 127.0.0.1:9000;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_param PATH_INFO $fastcgi_path_info;
-        fastcgi_pass 127.0.0.1:9000;
     }
 
-    location ~ /\.(?!well-known).* {
-        deny all;
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf)$ {
+        expires 30d;
+        access_log off;
     }
 }
 EOF
 
-# ---------- Supervisor: php-fpm + nginx ----------
-RUN mkdir -p /etc/supervisor.d \
-  && cat > /etc/supervisor.d/supervisord.ini << 'EOF'
+# Supervisor config
+RUN cat > /etc/supervisor.d/supervisord.ini << 'EOF'
 [supervisord]
 nodaemon=true
 user=root
@@ -125,21 +126,26 @@ autorestart=true
 priority=20
 EOF
 
-# ---------- Start script ----------
+# Start script
 RUN cat > /usr/local/bin/start.sh << 'EOF'
 #!/usr/bin/env sh
 set -e
 
-export PORT="${PORT:-80}"
+export PORT="${PORT:-8080}"
 
-mkdir -p /etc/nginx/conf.d
-mkdir -p /run/nginx
+mkdir -p /etc/nginx/conf.d /run/nginx
 
+# gera conf final do nginx a partir do template
 envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
+
+# (opcional) garantir storage/cache no runtime
+mkdir -p /var/www/html/storage /var/www/html/bootstrap/cache
+chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache || true
 
 exec supervisord -c /etc/supervisor.d/supervisord.ini
 EOF
+
 RUN chmod +x /usr/local/bin/start.sh
 
-EXPOSE 80
+EXPOSE 8080
 CMD ["/usr/local/bin/start.sh"]
