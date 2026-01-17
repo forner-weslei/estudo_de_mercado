@@ -20,7 +20,10 @@ RUN apt-get update && apt-get install -y \
         gd \
         intl \
     && a2enmod rewrite \
+    && a2dismod mpm_prefork mpm_worker || true \
+    && a2enmod mpm_event \
     && rm -rf /var/lib/apt/lists/*
+
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
