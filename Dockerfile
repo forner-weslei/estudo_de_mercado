@@ -1,13 +1,40 @@
-# ====== Base ======
-FROM php:8.2-apache
+# =========================
+# 1) Build PHP deps (Composer)
+# =========================
+FROM composer:2 AS vendor
 
-# ====== HARD LOCK: remove qualquer MPM preexistente (available + enabled) ======
-# Isso evita o erro "More than one MPM loaded"
-RUN rm -f /etc/apache2/mods-enabled/mpm_*.load /etc/apache2/mods-enabled/mpm_*.conf \
-    && rm -f /etc/apache2/mods-available/mpm_*.load /etc/apache2/mods-available/mpm_*.conf
+WORKDIR /app
 
-# ====== Dependências do sistema + extensões PHP ======
+COPY composer.json composer.lock ./
+RUN composer install \
+  --no-dev \
+  --prefer-dist \
+  --no-interaction \
+  --no-progress \
+  --optimize-autoloader \
+  --no-scripts
+
+# =========================
+# 2) (Opcional) Build assets (Vite / npm)
+# =========================
+FROM node:20-alpine AS assets
+WORKDIR /app
+
+# Copia só o necessário para cache
+COPY package*.json ./
+RUN if [ -f package.json ]; then npm ci; fi
+
+COPY . .
+RUN if [ -f package.json ]; then npm run build; fi
+
+# =========================
+# 3) Runtime: PHP-FPM + Nginx
+# =========================
+FROM php:8.2-fpm
+
+# --- Dependências do sistema + extensões PHP ---
 RUN apt-get update && apt-get install -y \
+    nginx \
     git \
     unzip \
     zip \
@@ -18,60 +45,49 @@ RUN apt-get update && apt-get install -y \
     libonig-dev \
     libxml2-dev \
     libicu-dev \
-    && docker-php-ext-configure gd --with-freetype --with-jpeg \
-    && docker-php-ext-install -j$(nproc) \
-        pdo \
-        pdo_mysql \
-        mbstring \
-        zip \
-        exif \
-        pcntl \
-        gd \
-        intl \
-    # Apache essentials
-    && a2enmod rewrite \
-    # Re-habilita somente o prefork
-    && a2enmod mpm_prefork \
-    && rm -rf /var/lib/apt/lists/*
+  && docker-php-ext-configure gd --with-freetype --with-jpeg \
+  && docker-php-ext-install -j$(nproc) \
+      pdo \
+      pdo_mysql \
+      mbstring \
+      zip \
+      exif \
+      pcntl \
+      gd \
+      intl \
+  && rm -rf /var/lib/apt/lists/*
 
-# ====== Composer ======
-COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+# --- Config Nginx ---
+# Vamos usar um arquivo nginx.conf dentro do repo
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# ====== Apache aponta para /public (Laravel) ======
-ENV APACHE_DOCUMENT_ROOT=/var/www/html/public
-RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' \
-    /etc/apache2/sites-available/000-default.conf \
-    /etc/apache2/apache2.conf \
-    /etc/apache2/conf-available/*.conf
-
-# ====== Diretório do app ======
 WORKDIR /var/www/html
 
-# ====== Copia primeiro só o composer para aproveitar cache ======
-COPY composer.json composer.lock ./
+# --- Copia vendor instalado via composer stage ---
+COPY --from=vendor /app/vendor ./vendor
+COPY --from=vendor /app/composer.lock ./composer.lock
+COPY --from=vendor /app/composer.json ./composer.json
 
-# ====== Instala dependências PHP (sem dev) ======
-# --no-scripts evita chamar artisan antes do código existir
-RUN composer install \
-    --no-dev \
-    --prefer-dist \
-    --no-interaction \
-    --no-progress \
-    --optimize-autoloader \
-    --no-scripts
-
-# ====== Copia o restante do projeto ======
+# --- Copia o restante do app ---
 COPY . .
 
-# ====== Garante diretórios e permissões ======
+# --- Copia assets buildados (se houver) ---
+# (Se não existir build, não quebra)
+COPY --from=assets /app/public/build ./public/build 2>/dev/null || true
+
+# --- Permissões Laravel ---
 RUN mkdir -p storage bootstrap/cache \
-    && chown -R www-data:www-data /var/www/html \
-    && chmod -R 775 storage bootstrap/cache
+  && chown -R www-data:www-data /var/www/html \
+  && chmod -R 775 storage bootstrap/cache
 
-# ====== Otimizações Laravel (não derruba o build se faltar env/chave) ======
+# --- Otimizações (não falha se faltar .env / APP_KEY) ---
 RUN php artisan config:cache || true \
-    && php artisan route:cache || true \
-    && php artisan view:cache || true
+ && php artisan route:cache || true \
+ && php artisan view:cache || true
 
-EXPOSE 80
-CMD ["apache2-foreground"]
+# Railway expõe via PORT. Vamos respeitar.
+ENV PORT=8080
+EXPOSE 8080
+
+# --- Start: php-fpm + nginx em foreground ---
+CMD sh -c "php-fpm -D && nginx -g 'daemon off;'"
