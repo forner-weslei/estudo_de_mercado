@@ -19,25 +19,20 @@ WORKDIR /app
 
 COPY composer.json composer.lock ./
 
-# Evita scripts no build (artisan) antes do runtime
 RUN composer install \
   --no-dev \
   --prefer-dist \
   --no-interaction \
   --no-progress \
-  --optimize-autoloader \
-  --no-scripts
+  --optimize-autoloader
 
 
 # =========================================================
-# 3) RUNTIME: PHP-FPM 8.4 + Nginx + Supervisor
+# 3) RUNTIME: PHP 8.4 + Composer + Nginx + PHP-FPM + Supervisor
 # =========================================================
 FROM php:8.4-fpm-alpine
 
-# ---------- Pacotes do sistema ----------
-# nginx: web server
-# supervisor: gerencia nginx + php-fpm
-# gettext: fornece envsubst (ESSENCIAL)
+# ---------- System packages + envsubst + nginx/supervisor ----------
 RUN apk add --no-cache \
     nginx \
     supervisor \
@@ -67,35 +62,35 @@ RUN apk add --no-cache \
       gd \
       intl
 
-# ---------- Diretório do app ----------
+# ---------- Install Composer in runtime (so you can run composer in SSH) ----------
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# ---------- App dir ----------
 WORKDIR /var/www/html
 
-# Copia o código do app
+# Copy app code
 COPY . .
 
-# Copia vendor do stage composer
+# Copy vendor from vendor stage
 COPY --from=vendor /app/vendor ./vendor
 
-# Copia build de assets (Vite: public/build)
-# Observação: assume que existe; se seu projeto não gera build, me avise que ajusto para não falhar.
+# Copy assets build (if exists in project)
+# If your project doesn't have Vite/build, this may fail. In that case, tell me and I adjust.
 COPY --from=node_build /app/public/build ./public/build
 
-# ---------- Pastas essenciais + permissões Laravel ----------
-# Corrige o 500:
-# - storage/framework/sessions inexistente
-# - cache path inválido (views/cache)
-RUN mkdir -p storage/framework/sessions \
-           storage/framework/views \
-           storage/framework/cache \
-           storage/framework/testing \
-           storage/logs \
-           bootstrap/cache \
+# ---------- Create Laravel required dirs + permissions ----------
+RUN mkdir -p \
+      storage/framework/sessions \
+      storage/framework/views \
+      storage/framework/cache \
+      storage/framework/testing \
+      storage/logs \
+      bootstrap/cache \
   && chown -R www-data:www-data /var/www/html \
   && chmod -R 775 storage bootstrap/cache
 
 # =========================================================
-# NGINX: config principal correto
-# (corrige "server directive is not allowed here")
+# NGINX main config (fixes "server directive not allowed here")
 # =========================================================
 RUN cat > /etc/nginx/nginx.conf << 'EOF'
 worker_processes  1;
@@ -109,15 +104,13 @@ http {
     sendfile        on;
     keepalive_timeout  65;
 
-    # Importante: inclui conf.d dentro do bloco http
     include /etc/nginx/conf.d/*.conf;
 }
 EOF
 
-# Pastas necessárias
+# Nginx template + folders
 RUN mkdir -p /etc/nginx/templates /etc/nginx/conf.d /run/nginx /etc/supervisor.d
 
-# Template do server (usa $PORT do Railway)
 RUN cat > /etc/nginx/templates/default.conf.template << 'EOF'
 server {
     listen       ${PORT};
@@ -153,7 +146,7 @@ server {
 EOF
 
 # =========================================================
-# Supervisor: logs no stdout/stderr (pra debugar no Railway)
+# Supervisor: run php-fpm + nginx, log to stdout/stderr
 # =========================================================
 RUN cat > /etc/supervisor.d/supervisord.ini << 'EOF'
 [supervisord]
@@ -180,7 +173,7 @@ stderr_logfile_maxbytes=0
 EOF
 
 # =========================================================
-# Start script: gera conf com envsubst e sobe supervisor
+# Start script: generate nginx conf using Railway PORT then start supervisor
 # =========================================================
 RUN cat > /usr/local/bin/start.sh << 'EOF'
 #!/usr/bin/env sh
@@ -190,10 +183,7 @@ export PORT="${PORT:-8080}"
 
 mkdir -p /etc/nginx/conf.d /run/nginx
 
-# Gera o default.conf com a porta do Railway
-envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
-
-# Corrige 500 por falta de pastas de session/cache/view em runtime
+# Create runtime dirs (Railway can mount volumes / reset perms)
 mkdir -p /var/www/html/storage/framework/sessions \
          /var/www/html/storage/framework/views \
          /var/www/html/storage/framework/cache \
@@ -203,6 +193,9 @@ mkdir -p /var/www/html/storage/framework/sessions \
 
 chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache || true
 chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache || true
+
+# Generate nginx conf with correct PORT
+envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
 
 exec supervisord -c /etc/supervisor.d/supervisord.ini
 EOF
