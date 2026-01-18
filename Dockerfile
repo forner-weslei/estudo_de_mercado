@@ -12,27 +12,31 @@ RUN if [ -f package.json ]; then npm run build; fi
 
 
 # =========================================================
-# 2) STAGE: Composer deps (vendor)
+# 2) STAGE: Composer deps (PHP vendor)
 # =========================================================
 FROM composer:2 AS vendor
 WORKDIR /app
 
 COPY composer.json composer.lock ./
 
+# Se você já tem vendor e o artisan existe, OK.
+# Se não existir, evitamos scripts aqui.
 RUN composer install \
   --no-dev \
   --prefer-dist \
   --no-interaction \
   --no-progress \
-  --optimize-autoloader
+  --optimize-autoloader \
+  --no-scripts
 
 
 # =========================================================
-# 3) RUNTIME: PHP 8.4 + Composer + Nginx + PHP-FPM + Supervisor
+# 3) STAGE: Runtime (PHP-FPM + Nginx + Supervisor)
 # =========================================================
 FROM php:8.4-fpm-alpine
 
-# ---------- System packages + envsubst + nginx/supervisor ----------
+# ---------- Pacotes do sistema ----------
+# gettext => envsubst
 RUN apk add --no-cache \
     nginx \
     supervisor \
@@ -40,7 +44,6 @@ RUN apk add --no-cache \
     git \
     unzip \
     zip \
-    curl \
     gettext \
     icu-dev \
     libzip-dev \
@@ -60,66 +63,72 @@ RUN apk add --no-cache \
       exif \
       pcntl \
       gd \
-      intl
+      intl \
+  && rm -rf /var/cache/apk/*
 
-# ---------- Install Composer in runtime (so you can run composer in SSH) ----------
+# ---------- Composer no runtime (para rodar composer no Railway shell, se precisar) ----------
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
-# ---------- App dir ----------
+# ---------- Diretório do app ----------
 WORKDIR /var/www/html
 
-# Copy app code
+# Copia projeto
 COPY . .
 
-# Copy vendor from vendor stage
+# Copia vendor do stage composer
 COPY --from=vendor /app/vendor ./vendor
 
-# Copy assets build (if exists in project)
-# If your project doesn't have Vite/build, this may fail. In that case, tell me and I adjust.
+# Copia build dos assets (se existir)
 COPY --from=node_build /app/public/build ./public/build
 
-# ---------- Create Laravel required dirs + permissions ----------
+# ---------- Permissões Laravel + pastas necessárias ----------
 RUN mkdir -p \
-      storage/framework/sessions \
-      storage/framework/views \
-      storage/framework/cache \
-      storage/framework/testing \
-      storage/logs \
-      bootstrap/cache \
+    storage/framework/cache \
+    storage/framework/sessions \
+    storage/framework/views \
+    storage/logs \
+    bootstrap/cache \
   && chown -R www-data:www-data /var/www/html \
   && chmod -R 775 storage bootstrap/cache
 
-# =========================================================
-# NGINX main config (fixes "server directive not allowed here")
-# =========================================================
-RUN cat > /etc/nginx/nginx.conf << 'EOF'
-worker_processes  1;
+# ---------- Nginx base config (garante que conf.d fica dentro do bloco http) ----------
+RUN cat > /etc/nginx/nginx.conf <<'EOF'
+user  nginx;
+worker_processes  auto;
 
-events { worker_connections  1024; }
+error_log  /var/log/nginx/error.log warn;
+pid        /var/run/nginx.pid;
+
+events {
+  worker_connections  1024;
+}
 
 http {
-    include       /etc/nginx/mime.types;
-    default_type  application/octet-stream;
+  include       /etc/nginx/mime.types;
+  default_type  application/octet-stream;
 
-    sendfile        on;
-    keepalive_timeout  65;
+  log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
 
-    include /etc/nginx/conf.d/*.conf;
+  access_log  /var/log/nginx/access.log  main;
+
+  sendfile        on;
+  keepalive_timeout  65;
+
+  include /etc/nginx/conf.d/*.conf;
 }
 EOF
 
-# Nginx template + folders
-RUN mkdir -p /etc/nginx/templates /etc/nginx/conf.d /run/nginx /etc/supervisor.d
-
-RUN cat > /etc/nginx/templates/default.conf.template << 'EOF'
+# ---------- Template do server (usa $PORT) ----------
+RUN mkdir -p /etc/nginx/templates /etc/nginx/conf.d /run/nginx
+RUN cat > /etc/nginx/templates/default.conf.template <<'EOF'
 server {
     listen       ${PORT};
     server_name  _;
     root /var/www/html/public;
 
     index index.php index.html;
-
-    client_max_body_size 20M;
 
     location / {
         try_files $uri $uri/ /index.php?$query_string;
@@ -131,24 +140,18 @@ server {
         fastcgi_pass 127.0.0.1:9000;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_param PATH_INFO $fastcgi_path_info;
-        fastcgi_read_timeout 300;
     }
 
     location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf)$ {
         expires 30d;
         access_log off;
     }
-
-    location ~ /\.(?!well-known).* {
-        deny all;
-    }
 }
 EOF
 
-# =========================================================
-# Supervisor: run php-fpm + nginx, log to stdout/stderr
-# =========================================================
-RUN cat > /etc/supervisor.d/supervisord.ini << 'EOF'
+# ---------- Supervisor: roda php-fpm + nginx ----------
+RUN mkdir -p /etc/supervisor.d
+RUN cat > /etc/supervisor.d/supervisord.ini <<'EOF'
 [supervisord]
 nodaemon=true
 user=root
@@ -157,49 +160,33 @@ user=root
 command=php-fpm -F
 autorestart=true
 priority=10
-stdout_logfile=/dev/fd/1
-stdout_logfile_maxbytes=0
-stderr_logfile=/dev/fd/2
-stderr_logfile_maxbytes=0
 
 [program:nginx]
-command=/usr/sbin/nginx -g "daemon off;"
+command=nginx -g "daemon off;"
 autorestart=true
 priority=20
-stdout_logfile=/dev/fd/1
-stdout_logfile_maxbytes=0
-stderr_logfile=/dev/fd/2
-stderr_logfile_maxbytes=0
 EOF
 
-# =========================================================
-# Start script: generate nginx conf using Railway PORT then start supervisor
-# =========================================================
-RUN cat > /usr/local/bin/start.sh << 'EOF'
+# ---------- Start script ----------
+RUN cat > /usr/local/bin/start.sh <<'EOF'
 #!/usr/bin/env sh
 set -e
 
+cd /var/www/html
+
+# Railway define PORT (normalmente 8080). Fallback local:
 export PORT="${PORT:-8080}"
 
-mkdir -p /etc/nginx/conf.d /run/nginx
+# Pastas necessárias em runtime (evita 500)
+mkdir -p storage/framework/cache storage/framework/sessions storage/framework/views bootstrap/cache storage/logs
+chown -R www-data:www-data storage bootstrap/cache
+chmod -R 775 storage bootstrap/cache
 
-# Create runtime dirs (Railway can mount volumes / reset perms)
-mkdir -p /var/www/html/storage/framework/sessions \
-         /var/www/html/storage/framework/views \
-         /var/www/html/storage/framework/cache \
-         /var/www/html/storage/framework/testing \
-         /var/www/html/storage/logs \
-         /var/www/html/bootstrap/cache
-
-chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache || true
-chmod -R 775 /var/www/html/storage /var/www/html/bootstrap/cache || true
-
-# Generate nginx conf with correct PORT
+# Gera conf final do nginx
 envsubst '${PORT}' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
 
 exec supervisord -c /etc/supervisor.d/supervisord.ini
 EOF
-
 RUN chmod +x /usr/local/bin/start.sh
 
 EXPOSE 8080
